@@ -35,6 +35,7 @@ import { MediaListSection } from "@/components/medialists/MediaListSection";
 import { Colors } from "@/constants/Colors";
 import useRouter from "@/hooks/useAppRouter";
 import { useNetworkStatus } from "@/hooks/useNetworkStatus";
+import { useRefetchHomeOnForeground } from "@/hooks/useRefetchHomeOnForeground";
 import { useInvalidatePlaybackProgressCache } from "@/hooks/useRevalidatePlaybackProgressCache";
 import { useDownload } from "@/providers/DownloadProvider";
 import { useIntroSheet } from "@/providers/IntroSheetProvider";
@@ -106,6 +107,9 @@ export const Home = () => {
     }
     prevIsConnected.current = isConnected;
   }, [isConnected, invalidateCache]);
+
+  // Refresh home data on mount (cold start) and when app returns to foreground
+  useRefetchHomeOnForeground();
 
   const hasDownloads = useMemo(() => {
     if (Platform.isTV) return false;

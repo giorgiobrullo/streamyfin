@@ -37,6 +37,7 @@ import { MediaListSection } from "@/components/medialists/MediaListSection";
 import { Colors } from "@/constants/Colors";
 import useRouter from "@/hooks/useAppRouter";
 import { useNetworkStatus } from "@/hooks/useNetworkStatus";
+import { useRefetchHomeOnForeground } from "@/hooks/useRefetchHomeOnForeground";
 import { useInvalidatePlaybackProgressCache } from "@/hooks/useRevalidatePlaybackProgressCache";
 import { useDownload } from "@/providers/DownloadProvider";
 import { apiAtom, userAtom } from "@/providers/JellyfinProvider";
@@ -67,8 +68,7 @@ export const HomeWithCarousel = () => {
   const api = useAtomValue(apiAtom);
   const user = useAtomValue(userAtom);
   const insets = useSafeAreaInsets();
-  const [_loading, setLoading] = useState(false);
-  const { settings, refreshStreamyfinPluginSettings } = useSettings();
+  const { settings } = useSettings();
   const headerOverlayOffset = Platform.isTV ? 0 : 60;
   const navigation = useNavigation();
   const animatedScrollRef = useAnimatedRef<Animated.ScrollView>();
@@ -90,6 +90,9 @@ export const HomeWithCarousel = () => {
     }
     prevIsConnected.current = isConnected;
   }, [isConnected, invalidateCache]);
+
+  // Refresh home data on mount (cold start) and when app returns to foreground
+  useRefetchHomeOnForeground();
 
   const hasDownloads = useMemo(() => {
     if (Platform.isTV) return false;
@@ -177,13 +180,6 @@ export const HomeWithCarousel = () => {
       ) || []
     );
   }, [userViews]);
-
-  const _refetch = async () => {
-    setLoading(true);
-    await refreshStreamyfinPluginSettings();
-    await invalidateCache();
-    setLoading(false);
-  };
 
   const createCollectionConfig = useCallback(
     (
