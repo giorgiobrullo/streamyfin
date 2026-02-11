@@ -200,10 +200,13 @@ export const Home = () => {
 
   const refetch = async () => {
     setLoading(true);
-    setLoadedSections(new Set());
-    await refreshStreamyfinPluginSettings();
-    await invalidateCache();
-    setLoading(false);
+    try {
+      setLoadedSections(new Set());
+      await refreshStreamyfinPluginSettings();
+      await invalidateCache();
+    } finally {
+      setLoading(false);
+    }
   };
 
   const createCollectionConfig = useCallback(

@@ -19,6 +19,7 @@ import { useTranslation } from "react-i18next";
 import {
   ActivityIndicator,
   Platform,
+  RefreshControl,
   TouchableOpacity,
   View,
 } from "react-native";
@@ -68,7 +69,8 @@ export const HomeWithCarousel = () => {
   const api = useAtomValue(apiAtom);
   const user = useAtomValue(userAtom);
   const insets = useSafeAreaInsets();
-  const { settings } = useSettings();
+  const { settings, refreshStreamyfinPluginSettings } = useSettings();
+  const [loading, setLoading] = useState(false);
   const headerOverlayOffset = Platform.isTV ? 0 : 60;
   const navigation = useNavigation();
   const animatedScrollRef = useAnimatedRef<Animated.ScrollView>();
@@ -93,6 +95,16 @@ export const HomeWithCarousel = () => {
 
   // Refresh home data on mount (cold start) and when app returns to foreground
   useRefetchHomeOnForeground();
+
+  const refetch = async () => {
+    setLoading(true);
+    try {
+      await refreshStreamyfinPluginSettings();
+      await invalidateCache();
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const hasDownloads = useMemo(() => {
     if (Platform.isTV) return false;
@@ -536,8 +548,18 @@ export const HomeWithCarousel = () => {
       nestedScrollEnabled
       contentInsetAdjustmentBehavior='never'
       scrollEventThrottle={16}
-      bounces={false}
+      bounces={!Platform.isTV}
       overScrollMode='never'
+      refreshControl={
+        !Platform.isTV ? (
+          <RefreshControl
+            refreshing={loading}
+            onRefresh={refetch}
+            tintColor='white'
+            colors={["white"]}
+          />
+        ) : undefined
+      }
       style={{ marginTop: -headerOverlayOffset }}
       contentContainerStyle={{ paddingTop: headerOverlayOffset }}
       onScroll={(event) => {
@@ -566,7 +588,7 @@ export const HomeWithCarousel = () => {
               settings.streamyStatsPromotedWatchlists;
             const streamystatsSections =
               index === streamystatsIndex && hasStreamystatsContent ? (
-                <>
+                <View key='streamystats-sections'>
                   {settings.streamyStatsMovieRecommendations && (
                     <StreamystatsRecommendations
                       title={t(
@@ -586,7 +608,7 @@ export const HomeWithCarousel = () => {
                   {settings.streamyStatsPromotedWatchlists && (
                     <StreamystatsPromotedWatchlists />
                   )}
-                </>
+                </View>
               ) : null;
 
             if (section.type === "InfiniteScrollingCollectionList") {
