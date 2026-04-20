@@ -788,8 +788,8 @@
     }
   },
   "watchlists": {
-    "title": "Watchlists",
-    "my_watchlists": "My Watchlists",
+    "title": "Listes de lecture",
+    "my_watchlists": "Mes listes de lecture",
     "public_watchlists": "Watchlist publique",
     "create_title": "Créer une Watchlist",
     "edit_title": "Modifier la Watchlist",
@@ -802,7 +802,7 @@
     "name_placeholder": "Entrer le nom de la playlist",
     "description_label": "Description",
     "description_placeholder": "Entrez la description (facultatif)",
-    "is_public_label": "Public Watchlist",
+    "is_public_label": "Liste de lecture Publique",
     "is_public_description": "Autoriser d'autres personnes à voir cette liste de suivi",
     "allowed_type_label": "Type de contenu",
     "sort_order_label": "Ordre de tri par défaut",

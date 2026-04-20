@@ -110,7 +110,7 @@
       "settings_title": "הגדרות",
       "log_out_button": "התנתק",
       "categories": {
-        "title": "Categories"
+        "title": "קטגוריות"
       },
       "playback_controls": {
         "title": "Playback & Controls"
@@ -271,8 +271,8 @@
         "margin": "Bottom Margin"
       },
       "video_player": {
-        "title": "Video Player",
-        "video_player": "Video Player",
+        "title": "נגן וידאו",
+        "video_player": "נגן וידאו",
         "video_player_description": "Choose which video player to use on iOS.",
         "ksplayer": "KSPlayer",
         "vlc": "VLC"
@@ -314,7 +314,7 @@
         "downloads_title": "הורדות"
       },
       "music": {
-        "title": "Music",
+        "title": "מוזיקה",
         "playback_title": "Playback",
         "playback_description": "Configure how music is played.",
         "prefer_downloaded": "Prefer Downloaded Songs",
@@ -522,8 +522,8 @@
     "collections": "אוספים",
     "actors": "שחקנים",
     "artists": "Artists",
-    "albums": "Albums",
-    "songs": "Songs",
+    "albums": "אלבומים",
+    "songs": "שירים",
     "playlists": "Playlists",
     "request_movies": "סרטים מבוקשים",
     "request_series": "סדרות מבוקשים",
@@ -606,8 +606,8 @@
     "go_back": "חזור",
     "downloaded_file_title": "You have this file downloaded",
     "downloaded_file_message": "Do you want to play the downloaded file?",
-    "downloaded_file_yes": "Yes",
-    "downloaded_file_no": "No",
+    "downloaded_file_yes": "כן",
+    "downloaded_file_no": "לא",
     "downloaded_file_cancel": "Cancel"
   },
   "item_card": {
@@ -719,10 +719,10 @@
     "favorites": "מועדפים"
   },
   "music": {
-    "title": "Music",
+    "title": "מוזיקה",
     "tabs": {
       "suggestions": "Suggestions",
-      "albums": "Albums",
+      "albums": "אלבומים",
       "artists": "Artists",
       "playlists": "Playlists",
       "tracks": "tracks"
@@ -798,9 +798,9 @@
     "delete_button": "Delete",
     "remove_button": "Remove",
     "cancel_button": "Cancel",
-    "name_label": "Name",
+    "name_label": "שם",
     "name_placeholder": "Enter watchlist name",
-    "description_label": "Description",
+    "description_label": "תיאור",
     "description_placeholder": "Enter description (optional)",
     "is_public_label": "Public Watchlist",
     "is_public_description": "Allow others to view this watchlist",
@@ -817,10 +817,10 @@
     "remove_from_watchlist": "Remove from Watchlist",
     "select_watchlist": "Select Watchlist",
     "create_new": "Create New Watchlist",
-    "item": "item",
-    "items": "items",
-    "public": "Public",
-    "private": "Private",
+    "item": "פריט",
+    "items": "פריטים",
+    "public": "ציבורי",
+    "private": "פרטי",
     "you": "You",
     "by_owner": "By another user",
     "not_found": "Watchlist not found",
@@ -835,7 +835,7 @@
   "playback_speed": {
     "title": "Playback Speed",
     "apply_to": "Apply To",
-    "speed": "Speed",
+    "speed": "מהירות",
     "scope": {
       "media": "This media only",
       "show": "This show",

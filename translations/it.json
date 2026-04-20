@@ -136,7 +136,7 @@
         "not_connected_to_wifi": "Not connected to WiFi",
         "no_networks_configured": "No networks configured",
         "add_network_hint": "Add your home WiFi network to enable auto-switching",
-        "current_wifi": "Current WiFi",
+        "current_wifi": "WiFi Attuale",
         "using_url": "Sta utilizzando",
         "local": "Local URL",
         "remote": "Remote URL",
