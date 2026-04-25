@@ -137,6 +137,8 @@ export default function page() {
   const [showTechnicalInfo, setShowTechnicalInfo] = useState(false);
   const [showSyncPlayModal, setShowSyncPlayModal] = useState(false);
   const [airplayHlsUrl, setAirplayHlsUrl] = useState<string | null>(null);
+  const [airplayStartPositionSeconds, setAirplayStartPositionSeconds] =
+    useState(0);
   const [airplayLoading, setAirplayLoading] = useState(false);
   /** When non-null, overrides the default start position for the MPV player on next mount. */
   const [resumePositionSecondsOverride, setResumePositionSecondsOverride] =
@@ -1379,13 +1381,15 @@ export default function page() {
     return {
       url: airplayHlsUrl,
       autoplay: true,
-      // Position is already encoded into the HLS URL via startTimeTicks
-      startPosition: 0,
+      // Jellyfin's HLS playlist always starts at segment 0 / source time 0,
+      // regardless of the startTimeTicks query param (which is only a hint to
+      // the transcoder). We have to seek AVPlayer manually after load.
+      startPosition: airplayStartPositionSeconds,
       headers: api?.accessToken
         ? { Authorization: `MediaBrowser Token="${api.accessToken}"` }
         : undefined,
     };
-  }, [airplayHlsUrl, api?.accessToken]);
+  }, [airplayHlsUrl, airplayStartPositionSeconds, api?.accessToken]);
 
   const enableAirplayMode = useCallback(async () => {
     if (
@@ -1422,6 +1426,7 @@ export default function page() {
           sub: subtitleIndex,
           aud: audioIndex,
         };
+        setAirplayStartPositionSeconds(currentSeconds);
         setAirplayHlsUrl(result.url);
       } else {
         // Fall back: resume MPV
@@ -1547,6 +1552,7 @@ export default function page() {
             sub: subtitleIndex,
             aud: audioIndex,
           };
+          setAirplayStartPositionSeconds(currentSeconds);
           setAirplayHlsUrl(result.url);
         }
       } catch (e) {
