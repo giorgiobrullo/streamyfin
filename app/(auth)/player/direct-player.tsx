@@ -43,6 +43,7 @@ import { useInvalidatePlaybackProgressCache } from "@/hooks/useRevalidatePlaybac
 import { useSyncPlay } from "@/hooks/useSyncPlay";
 import { useWebSocket } from "@/hooks/useWebsockets";
 import {
+  AirplayState,
   type MpvOnErrorEventPayload,
   type MpvOnPlaybackStateChangePayload,
   type MpvOnProgressEventPayload,
@@ -99,6 +100,11 @@ const SYNC_PLAY_SAFETY_NET_CHECK_INTERVAL_MS = 3000;
 export default function page() {
   const videoRef = useRef<MpvPlayerViewRef>(null);
   const airplayWasActiveRef = useRef(false);
+  const airplayAutoEngageCheckedRef = useRef(false);
+  const airplayBuiltWithIndicesRef = useRef<{
+    sub: number | undefined;
+    aud: number | undefined;
+  } | null>(null);
   const user = useAtomValue(userAtom);
   const api = useAtomValue(apiAtom);
   const {
@@ -1412,6 +1418,10 @@ export default function page() {
       });
 
       if (result?.url) {
+        airplayBuiltWithIndicesRef.current = {
+          sub: subtitleIndex,
+          aud: audioIndex,
+        };
         setAirplayHlsUrl(result.url);
       } else {
         // Fall back: resume MPV
@@ -1452,6 +1462,112 @@ export default function page() {
     setResumePositionSecondsOverride(resumeAt);
     setAirplayHlsUrl(null);
   }, [airplayHlsUrl]);
+
+  // Auto-engage AirPlay if the audio session route is already routed to an
+  // AirPlay output when the player opens (e.g., user closed and reopened
+  // playback while AirPlay was still active at the system level).
+  useEffect(() => {
+    if (airplayAutoEngageCheckedRef.current) return;
+    if (!api || !user?.Id || !item?.Id || offline) return;
+    airplayAutoEngageCheckedRef.current = true;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const isActive = await AirplayState.isActive();
+        if (cancelled) return;
+        if (isActive && !airplayHlsUrl && !airplayLoading) {
+          void enableAirplayMode();
+        }
+      } catch (e) {
+        console.warn("Failed to query AirPlay state:", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    api,
+    user?.Id,
+    item?.Id,
+    offline,
+    airplayHlsUrl,
+    airplayLoading,
+    enableAirplayMode,
+  ]);
+
+  // Live observation of audio session route changes. Engages AirPlay mode if
+  // the user activates AirPlay via Control Center while in MPV mode.
+  useEffect(() => {
+    const unsubscribe = AirplayState.addRouteChangeListener(({ isActive }) => {
+      if (isActive && !airplayHlsUrl && !airplayLoading) {
+        void enableAirplayMode();
+      }
+    });
+    return unsubscribe;
+  }, [airplayHlsUrl, airplayLoading, enableAirplayMode]);
+
+  // Rebuild the AirPlay HLS URL when the user changes subtitle or audio track
+  // during an active AirPlay session. The new URL encodes the chosen tracks
+  // (with burn-in subs where applicable) and resumes from the current
+  // position. NativeVideoPlayer's source-change effect picks up the new URL
+  // and calls player.replace() to load it.
+  useEffect(() => {
+    if (!airplayHlsUrl) {
+      airplayBuiltWithIndicesRef.current = null;
+      return;
+    }
+    const last = airplayBuiltWithIndicesRef.current;
+    if (last && last.sub === subtitleIndex && last.aud === audioIndex) return;
+    if (!api || !user?.Id || !item?.Id) return;
+
+    let cancelled = false;
+    (async () => {
+      setAirplayLoading(true);
+      try {
+        const currentSeconds =
+          (await videoRef.current?.getCurrentPosition()) ?? 0;
+        await videoRef.current?.pause();
+
+        const result = await getAirplayStreamUrl({
+          api,
+          item,
+          userId: user.Id,
+          startTimeTicks: msToTicks(currentSeconds * 1000),
+          maxStreamingBitrate: settings?.defaultBitrate?.value ?? undefined,
+          audioStreamIndex: audioIndex,
+          subtitleStreamIndex: subtitleIndex,
+          mediaSourceId: stream?.mediaSource?.Id,
+          deviceId: api.deviceInfo?.id,
+        });
+
+        if (cancelled) return;
+        if (result?.url) {
+          airplayBuiltWithIndicesRef.current = {
+            sub: subtitleIndex,
+            aud: audioIndex,
+          };
+          setAirplayHlsUrl(result.url);
+        }
+      } catch (e) {
+        console.warn("Failed to rebuild AirPlay URL on track change:", e);
+      } finally {
+        if (!cancelled) setAirplayLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    subtitleIndex,
+    audioIndex,
+    airplayHlsUrl,
+    api,
+    user?.Id,
+    item,
+    settings?.defaultBitrate?.value,
+    stream?.mediaSource?.Id,
+  ]);
 
   const volumeUpCb = useCallback(async () => {
     if (Platform.isTV) return;

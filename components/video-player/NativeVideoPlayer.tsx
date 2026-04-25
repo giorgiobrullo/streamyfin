@@ -63,13 +63,28 @@ export const NativeVideoPlayer = forwardRef<
     const startPositionApplied = useRef(false);
     const hasReportedLoad = useRef(false);
     const tracksReported = useRef(false);
+    const lastLoadedUrl = useRef<string | undefined>(undefined);
 
     useEffect(() => {
       // Reset apply flags when source changes
       startPositionApplied.current = false;
       hasReportedLoad.current = false;
       tracksReported.current = false;
-    }, [source?.url]);
+
+      // useVideoPlayer doesn't reactively swap the source; once the player is
+      // created, source updates have to be applied imperatively via replace().
+      // The initial source is already set by useVideoPlayer; only call replace
+      // when the URL has actually changed since the last load.
+      if (!source?.url) return;
+      if (lastLoadedUrl.current === source.url) return;
+      if (lastLoadedUrl.current !== undefined) {
+        const newSource = buildExpoSource(source);
+        if (newSource) {
+          player.replace(newSource);
+        }
+      }
+      lastLoadedUrl.current = source.url;
+    }, [source, player]);
 
     useEffect(() => {
       if (!source?.url) return;

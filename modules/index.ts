@@ -1,3 +1,8 @@
+// Airplay State (iOS only)
+
+export type { RouteChangeEvent as AirplayRouteChangeEvent } from "./airplay-state";
+export { AirplayState } from "./airplay-state";
+
 // Background Downloader
 export type {
   ActiveDownload,
