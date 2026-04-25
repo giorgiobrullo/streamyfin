@@ -93,6 +93,13 @@
       "expo-localization",
       "expo-asset",
       [
+        "expo-video",
+        {
+          "supportsBackgroundPlayback": true,
+          "supportsPictureInPicture": true
+        }
+      ],
+      [
         "react-native-edge-to-edge",
         {
           "android": {
