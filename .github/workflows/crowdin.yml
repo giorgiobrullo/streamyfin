@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 0
 
       - name: 🌐 Sync Translations with Crowdin
-        uses: crowdin/github-action@5587c43063e52090026857d386174d2599ad323b # v2.14.1
+        uses: crowdin/github-action@c4603c03221bf738306d907d28d4942da99a0afa # v2.16.1
         with:
           upload_sources: true
           upload_translations: true
