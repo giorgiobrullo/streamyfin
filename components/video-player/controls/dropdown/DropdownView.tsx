@@ -32,6 +32,8 @@ interface DropdownViewProps {
   setPlaybackSpeed?: (speed: number, scope: PlaybackSpeedScope) => void;
   showTechnicalInfo?: boolean;
   onToggleTechnicalInfo?: () => void;
+  isInSyncPlayGroup?: boolean;
+  openSyncPlay?: () => void;
 }
 
 const DropdownView = ({
@@ -39,6 +41,8 @@ const DropdownView = ({
   setPlaybackSpeed,
   showTechnicalInfo = false,
   onToggleTechnicalInfo,
+  isInSyncPlayGroup = false,
+  openSyncPlay,
 }: DropdownViewProps) => {
   const { subtitleTracks, audioTracks } = useVideoContext();
   const { item, mediaSource } = usePlayerContext();
@@ -165,6 +169,19 @@ const DropdownView = ({
       });
     }
 
+    // SyncPlay
+    if (openSyncPlay) {
+      groups.push({
+        options: [
+          {
+            type: "action" as const,
+            label: isInSyncPlayGroup ? "SyncPlay (Connected)" : "SyncPlay",
+            onPress: openSyncPlay,
+          },
+        ],
+      });
+    }
+
     // Technical Info (at bottom)
     if (onToggleTechnicalInfo) {
       groups.push({
@@ -196,6 +213,8 @@ const DropdownView = ({
     setPlaybackSpeed,
     showTechnicalInfo,
     onToggleTechnicalInfo,
+    isInSyncPlayGroup,
+    openSyncPlay,
     // Note: subtitleTracks and audioTracks are intentionally excluded
     // because we use subtitleTracksKey and audioTracksKey for stability
   ]);

@@ -72,6 +72,8 @@ interface Props {
   getTechnicalInfo?: () => Promise<TechnicalInfo>;
   playMethod?: "DirectPlay" | "DirectStream" | "Transcode";
   transcodeReasons?: string[];
+  isInSyncPlayGroup?: boolean;
+  openSyncPlay?: () => void;
 }
 
 export const Controls: FC<Props> = ({
@@ -101,6 +103,8 @@ export const Controls: FC<Props> = ({
   getTechnicalInfo,
   playMethod,
   transcodeReasons,
+  isInSyncPlayGroup = false,
+  openSyncPlay,
 }) => {
   const offline = useOfflineMode();
   const { settings, updateSettings } = useSettings();
@@ -505,6 +509,8 @@ export const Controls: FC<Props> = ({
               setPlaybackSpeed={setPlaybackSpeed}
               showTechnicalInfo={showTechnicalInfo}
               onToggleTechnicalInfo={onToggleTechnicalInfo}
+              isInSyncPlayGroup={isInSyncPlayGroup}
+              openSyncPlay={openSyncPlay}
             />
           </Animated.View>
           <Animated.View

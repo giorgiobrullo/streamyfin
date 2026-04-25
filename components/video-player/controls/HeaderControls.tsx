@@ -37,6 +37,8 @@ interface HeaderControlsProps {
   // Technical info props
   showTechnicalInfo?: boolean;
   onToggleTechnicalInfo?: () => void;
+  isInSyncPlayGroup?: boolean;
+  openSyncPlay?: () => void;
 }
 
 export const HeaderControls: FC<HeaderControlsProps> = ({
@@ -57,6 +59,8 @@ export const HeaderControls: FC<HeaderControlsProps> = ({
   setPlaybackSpeed,
   showTechnicalInfo = false,
   onToggleTechnicalInfo,
+  isInSyncPlayGroup = false,
+  openSyncPlay,
 }) => {
   const { settings } = useSettings();
   const router = useRouter();
@@ -117,6 +121,8 @@ export const HeaderControls: FC<HeaderControlsProps> = ({
               setPlaybackSpeed={setPlaybackSpeed}
               showTechnicalInfo={showTechnicalInfo}
               onToggleTechnicalInfo={onToggleTechnicalInfo}
+              isInSyncPlayGroup={isInSyncPlayGroup}
+              openSyncPlay={openSyncPlay}
             />
           </View>
         )}

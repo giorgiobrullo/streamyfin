@@ -174,6 +174,8 @@ export type Settings = {
   disableHapticFeedback: boolean;
   subtitleSize: number;
   safeAreaInControlsEnabled: boolean;
+  showHomeSyncPlayButton: boolean;
+  syncPlaySyncCorrection: boolean;
   jellyseerrServerUrl?: string;
   useKefinTweaks: boolean;
   hiddenLibraries?: string[];
@@ -259,6 +261,8 @@ export const defaultValues: Settings = {
   disableHapticFeedback: false,
   subtitleSize: 100, // Scale value * 100, so 100 = 1.0x
   safeAreaInControlsEnabled: true,
+  showHomeSyncPlayButton: true,
+  syncPlaySyncCorrection: false,
   jellyseerrServerUrl: undefined,
   useKefinTweaks: false,
   hiddenLibraries: [],
@@ -327,7 +331,7 @@ const saveSettings = (settings: Settings) => {
   }
 };
 
-export const settingsAtom = atom<Partial<Settings> | null>(null);
+export const settingsAtom = atom<Partial<Settings> | null>(loadSettings());
 const loadPluginSettings = () => {
   try {
     return storage.get<PluginLockableSettings>(STREAMYFIN_PLUGIN_SETTINGS);

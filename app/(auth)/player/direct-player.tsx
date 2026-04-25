@@ -14,7 +14,13 @@ import { useLocalSearchParams, useNavigation } from "expo-router";
 import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Alert, Platform, useWindowDimensions, View } from "react-native";
+import {
+  Alert,
+  AppState,
+  Platform,
+  useWindowDimensions,
+  View,
+} from "react-native";
 import { useAnimatedReaction, useSharedValue } from "react-native-reanimated";
 import { BITRATES } from "@/components/BitrateSelector";
 import { Text } from "@/components/common/Text";
@@ -22,6 +28,7 @@ import { Loader } from "@/components/Loader";
 import { Controls } from "@/components/video-player/controls/Controls";
 import { PlayerProvider } from "@/components/video-player/controls/contexts/PlayerContext";
 import { VideoProvider } from "@/components/video-player/controls/contexts/VideoContext";
+import { SyncPlayModal } from "@/components/video-player/controls/SyncPlayModal";
 import {
   PlaybackSpeedScope,
   updatePlaybackSpeedSettings,
@@ -32,6 +39,7 @@ import { useOrientation } from "@/hooks/useOrientation";
 import { usePlaybackManager } from "@/hooks/usePlaybackManager";
 import usePlaybackSpeed from "@/hooks/usePlaybackSpeed";
 import { useInvalidatePlaybackProgressCache } from "@/hooks/useRevalidatePlaybackProgressCache";
+import { useSyncPlay } from "@/hooks/useSyncPlay";
 import { useWebSocket } from "@/hooks/useWebsockets";
 import {
   type MpvOnErrorEventPayload,
@@ -44,8 +52,15 @@ import {
 import { useDownload } from "@/providers/DownloadProvider";
 import { DownloadedItem } from "@/providers/Downloads/types";
 import { apiAtom, userAtom } from "@/providers/JellyfinProvider";
-
 import { OfflineModeProvider } from "@/providers/OfflineModeProvider";
+import { useWebSocketContext } from "@/providers/WebSocketProvider";
+import {
+  syncPlayBuffering,
+  syncPlayPause,
+  syncPlayPlay,
+  syncPlayReady,
+  syncPlaySeek,
+} from "@/services/SyncPlayService";
 
 import { useSettings } from "@/utils/atoms/settings";
 import { getPrimaryImageUrl } from "@/utils/jellyfin/image/getPrimaryImageUrl";
@@ -56,12 +71,39 @@ import {
 } from "@/utils/jellyfin/subtitleUtils";
 import { writeToLog } from "@/utils/log";
 import { generateDeviceProfile } from "@/utils/profiles/native";
-import { msToTicks, ticksToSeconds } from "@/utils/time";
+import { msToTicks, ticksToMs, ticksToSeconds } from "@/utils/time";
+
+const SYNC_PLAY_DRIFT_CHECK_INTERVAL_MS = 1500;
+const SYNC_PLAY_RESYNC_COOLDOWN_MS = 1500;
+const SYNC_PLAY_QUEUE_PLAYBACK_STATE_MAX_AGE_MS = 5000;
+
+// SpeedToSync: smooth catch-up via playback rate adjustment for small drifts.
+const SYNC_PLAY_MIN_DRIFT_SPEED_SYNC_MS = 200;
+const SYNC_PLAY_MAX_DRIFT_SPEED_SYNC_MS = 2500;
+const SYNC_PLAY_SPEED_SYNC_DURATION_MS = 1000;
+const SYNC_PLAY_MIN_SPEED_CLAMP = 0.2;
+
+// SkipToSync: hard seek for large drifts.
+const SYNC_PLAY_MIN_DRIFT_SKIP_SYNC_MS = 400;
+
+// Buffering debounce: don't notify server of brief stalls.
+const SYNC_PLAY_BUFFERING_DEBOUNCE_MS = 1500;
+
+// Safety net: always-on large-drift catch (even with sync correction off).
+// Catches catastrophic desync from backgrounding, missed commands, etc.
+const SYNC_PLAY_SAFETY_NET_DRIFT_MS = 5000;
+const SYNC_PLAY_SAFETY_NET_CHECK_INTERVAL_MS = 3000;
 
 export default function page() {
   const videoRef = useRef<MpvPlayerViewRef>(null);
   const user = useAtomValue(userAtom);
   const api = useAtomValue(apiAtom);
+  const {
+    isInSyncPlayGroup,
+    isConnected,
+    syncPlayPlaylistItemId,
+    syncPlayCurrentPositionCapturedAtMs,
+  } = useWebSocketContext();
   const { t } = useTranslation();
   const navigation = useNavigation();
   const router = useRouter();
@@ -84,6 +126,26 @@ export default function page() {
   const [hasPlaybackStarted, setHasPlaybackStarted] = useState(false);
   const [currentPlaybackSpeed, setCurrentPlaybackSpeed] = useState(1.0);
   const [showTechnicalInfo, setShowTechnicalInfo] = useState(false);
+  const [showSyncPlayModal, setShowSyncPlayModal] = useState(false);
+  const lastReportedSyncPlayBufferingRef = useRef<boolean | null>(null);
+  const isPlayingRef = useRef(false);
+  const reportSyncPlayPauseRef = useRef<(() => Promise<void>) | undefined>(
+    undefined,
+  );
+  const lastSyncPlaySeekAtRef = useRef(0);
+  const lastLocalPlayPauseCommandAtRef = useRef(0);
+  const lastDriftCorrectionAtRef = useRef(0);
+  const speedSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isSpeedSyncingRef = useRef(false);
+  const bufferingDebounceTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const queueUpdateObservedAtRef = useRef(0);
+  const wasSocketConnectedRef = useRef(isConnected);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
 
   const progress = useSharedValue(0);
   const isSeeking = useSharedValue(false);
@@ -149,6 +211,104 @@ export default function page() {
     isLoading: true,
     isError: false,
   });
+  const handleRequireSyncPlayItem = useCallback(
+    (targetItemId: string, startPositionTicks?: number) => {
+      // Check both the loaded item and the URL param to prevent loops
+      // (item?.Id may still be null while the page is loading the new itemId)
+      if (
+        !targetItemId ||
+        targetItemId === item?.Id ||
+        targetItemId === itemId
+      ) {
+        return;
+      }
+
+      router.replace({
+        pathname: "/(auth)/player/direct-player",
+        params: {
+          itemId: targetItemId,
+          offline: "false",
+          playbackPosition: startPositionTicks?.toString(),
+        },
+      });
+    },
+    [item?.Id, itemId, router],
+  );
+  const syncPlay = useSyncPlay({
+    currentItemId: item?.Id,
+    getCurrentPositionMs: () => progress.get(),
+    offline,
+    onRequirePlaybackItem: handleRequireSyncPlayItem,
+  });
+
+  useEffect(() => {
+    if (syncPlay.queueUpdate) {
+      // Use the server-derived timestamp (already adjusted to local time) rather
+      // than Date.now(). This accounts for network delay between when the server
+      // set the position and when we processed the message.
+      queueUpdateObservedAtRef.current =
+        syncPlayCurrentPositionCapturedAtMs ?? Date.now();
+    }
+  }, [syncPlay.queueUpdate, syncPlayCurrentPositionCapturedAtMs]);
+
+  const getAuthoritativeSyncPlayIsPlaying = useCallback((): boolean | null => {
+    const groupState = syncPlay.stateUpdate?.State ?? syncPlay.groupInfo?.State;
+    if (groupState === "Playing") {
+      return true;
+    }
+    if (
+      groupState === "Paused" ||
+      groupState === "Waiting" ||
+      groupState === "Idle"
+    ) {
+      return false;
+    }
+
+    const queueIsPlaying = syncPlay.queueUpdate?.IsPlaying;
+    if (typeof queueIsPlaying !== "boolean") {
+      return null;
+    }
+
+    const observedAtMs = queueUpdateObservedAtRef.current;
+    if (
+      observedAtMs <= 0 ||
+      Date.now() - observedAtMs > SYNC_PLAY_QUEUE_PLAYBACK_STATE_MAX_AGE_MS
+    ) {
+      return null;
+    }
+
+    return queueIsPlaying;
+  }, [
+    syncPlay.stateUpdate?.State,
+    syncPlay.groupInfo?.State,
+    syncPlay.queueUpdate?.IsPlaying,
+  ]);
+
+  const currentSyncPlayQueueState = useMemo(() => {
+    if (!syncPlay.queueUpdate || !item?.Id) {
+      return null;
+    }
+
+    const currentIndex = syncPlay.queueUpdate.PlayingItemIndex;
+    const playlist = syncPlay.queueUpdate.Playlist;
+    if (
+      typeof currentIndex !== "number" ||
+      !Array.isArray(playlist) ||
+      currentIndex < 0 ||
+      currentIndex >= playlist.length
+    ) {
+      return null;
+    }
+
+    const queueItem = playlist[currentIndex];
+    if (!queueItem?.ItemId || queueItem.ItemId !== item.Id) {
+      return null;
+    }
+
+    return {
+      startPositionTicks: syncPlay.queueUpdate.StartPositionTicks,
+    };
+  }, [syncPlay.queueUpdate, item?.Id]);
 
   // Resolve audio index: use URL param if provided, otherwise use stored index for offline playback
   const audioIndex = useMemo(() => {
@@ -170,6 +330,13 @@ export default function page() {
   // Handler for changing playback speed
   const handleSetPlaybackSpeed = useCallback(
     async (speed: number, scope: PlaybackSpeedScope) => {
+      // Cancel any active SpeedToSync so user speed takes priority
+      if (speedSyncTimerRef.current) {
+        clearTimeout(speedSyncTimerRef.current);
+        speedSyncTimerRef.current = null;
+      }
+      isSpeedSyncingRef.current = false;
+
       // Update settings based on scope
       updatePlaybackSpeedSettings(
         speed,
@@ -220,7 +387,7 @@ export default function page() {
       }
     };
 
-    if (itemId) {
+    if (itemId && (offline || api)) {
       fetchItemData();
     }
   }, [itemId, offline, api, user?.Id]);
@@ -249,16 +416,15 @@ export default function page() {
   });
 
   useEffect(() => {
+    // Bail out immediately without any setState if item hasn't loaded yet.
+    // This prevents cascading re-renders when combined with SyncPlay/WebSocket state updates.
+    if (!item?.Id) {
+      return;
+    }
+
     const fetchStreamData = async () => {
       setStreamStatus({ isLoading: true, isError: false });
       try {
-        // Don't attempt to fetch stream data if item is not available
-        if (!item?.Id) {
-          console.log("Item not loaded yet, skipping stream data fetch");
-          setStreamStatus({ isLoading: false, isError: false });
-          return;
-        }
-
         let result: Stream | null = null;
         if (offline && downloadedItem && downloadedItem.mediaSource) {
           const url = downloadedItem.videoFilePath;
@@ -341,25 +507,631 @@ export default function page() {
     reportPlaybackStart();
   }, [stream, api, offline]);
 
-  const togglePlay = async () => {
-    lightHapticFeedback();
-    setIsPlaying(!isPlaying);
-    if (isPlaying) {
+  const currentPlayStateInfo = useCallback(():
+    | PlaybackProgressInfo
+    | undefined => {
+    if (!stream || !item?.Id) return;
+
+    return {
+      ItemId: item.Id,
+      AudioStreamIndex: audioIndex ? audioIndex : undefined,
+      SubtitleStreamIndex: subtitleIndex ? subtitleIndex : undefined,
+      MediaSourceId: mediaSourceId,
+      PositionTicks: msToTicks(progress.get()),
+      IsPaused: !isPlaying,
+      PlayMethod: stream?.url.includes("m3u8") ? "Transcode" : "DirectStream",
+      PlaySessionId: stream.sessionId,
+      IsMuted: isMuted,
+      CanSeek: true,
+      RepeatMode: RepeatMode.RepeatNone,
+      PlaybackOrder: PlaybackOrder.Default,
+    };
+  }, [
+    stream,
+    item?.Id,
+    audioIndex,
+    subtitleIndex,
+    mediaSourceId,
+    progress,
+    isPlaying,
+    isMuted,
+  ]);
+
+  const buildSyncPlayPlayerStateRequest = useCallback(
+    (isPlayingOverride?: boolean) => ({
+      When: new Date().toISOString(),
+      PositionTicks: msToTicks(progress.get()),
+      IsPlaying: isPlayingOverride ?? isPlaying,
+      PlaylistItemId: syncPlayPlaylistItemId ?? undefined,
+    }),
+    [progress, isPlaying, syncPlayPlaylistItemId],
+  );
+
+  const reportSyncPlayBuffering = useCallback(
+    async (isPlayingOverride?: boolean) => {
+      if (!api || offline || !isInSyncPlayGroup) return;
+      try {
+        await syncPlayBuffering(
+          api,
+          buildSyncPlayPlayerStateRequest(isPlayingOverride),
+        );
+      } catch (error) {
+        console.warn("Failed to report SyncPlay buffering state:", error);
+      }
+    },
+    [api, offline, isInSyncPlayGroup, buildSyncPlayPlayerStateRequest],
+  );
+
+  const reportSyncPlayReady = useCallback(
+    async (isPlayingOverride?: boolean) => {
+      if (!api || offline || !isInSyncPlayGroup) return;
+      try {
+        await syncPlayReady(
+          api,
+          buildSyncPlayPlayerStateRequest(isPlayingOverride),
+        );
+      } catch (error) {
+        console.warn("Failed to report SyncPlay ready state:", error);
+      }
+    },
+    [api, offline, isInSyncPlayGroup, buildSyncPlayPlayerStateRequest],
+  );
+
+  const reportSyncPlayPause = useCallback(async () => {
+    if (!api || offline || !isInSyncPlayGroup) return;
+    try {
+      await syncPlayPause(api);
+    } catch (error) {
+      console.warn("Failed to report SyncPlay pause:", error);
+    }
+  }, [api, offline, isInSyncPlayGroup]);
+
+  useEffect(() => {
+    reportSyncPlayPauseRef.current = reportSyncPlayPause;
+  }, [reportSyncPlayPause]);
+
+  const reportSyncPlayPlay = useCallback(async () => {
+    if (!api || offline || !isInSyncPlayGroup) return;
+    try {
+      await syncPlayPlay(api);
+    } catch (error) {
+      console.warn("Failed to report SyncPlay play:", error);
+    }
+  }, [api, offline, isInSyncPlayGroup]);
+
+  const reportSyncPlaySeek = useCallback(
+    async (positionTicks: number) => {
+      if (!api || offline || !isInSyncPlayGroup) return;
+      try {
+        await syncPlaySeek(api, { PositionTicks: positionTicks });
+      } catch (error) {
+        console.warn("Failed to report SyncPlay seek:", error);
+      }
+    },
+    [api, offline, isInSyncPlayGroup],
+  );
+
+  const pausePlaybackInternal = useCallback(
+    async (reportSyncPlay = true) => {
+      if (!isPlayingRef.current) return;
+
+      isPlayingRef.current = false;
+      setIsPlaying(false);
       await videoRef.current?.pause();
+
       const progressInfo = currentPlayStateInfo();
       if (progressInfo) {
         playbackManager.reportPlaybackProgress(progressInfo);
       }
-    } else {
+
+      if (reportSyncPlay) {
+        lastLocalPlayPauseCommandAtRef.current = Date.now();
+        await reportSyncPlayPause();
+      }
+    },
+    [currentPlayStateInfo, playbackManager, reportSyncPlayPause, videoRef],
+  );
+
+  const playPlaybackInternal = useCallback(
+    async (reportSyncPlay = true) => {
+      if (isPlayingRef.current) return;
+
+      isPlayingRef.current = true;
+      setIsPlaying(true);
       videoRef.current?.play();
+
       const progressInfo = currentPlayStateInfo();
       if (!offline && api) {
         await getPlaystateApi(api).reportPlaybackStart({
           playbackStartInfo: progressInfo,
         });
       }
+
+      if (reportSyncPlay) {
+        lastLocalPlayPauseCommandAtRef.current = Date.now();
+        await reportSyncPlayPlay();
+      }
+    },
+    [videoRef, currentPlayStateInfo, offline, api, reportSyncPlayPlay],
+  );
+
+  const togglePlay = useCallback(async () => {
+    lightHapticFeedback();
+    if (isPlayingRef.current) {
+      await pausePlaybackInternal(true);
+      return;
     }
-  };
+    await playPlaybackInternal(true);
+  }, [lightHapticFeedback, pausePlaybackInternal, playPlaybackInternal]);
+
+  const playFromSyncPlay = useCallback(() => {
+    void playPlaybackInternal(false);
+  }, [playPlaybackInternal]);
+
+  const pauseFromSyncPlay = useCallback(() => {
+    void pausePlaybackInternal(false);
+  }, [pausePlaybackInternal]);
+
+  const seekInternal = useCallback(
+    (positionMs: number, reportSyncPlay = true) => {
+      // MPV expects seconds, convert from ms.
+      videoRef.current?.seekTo?.(positionMs / 1000);
+      if (reportSyncPlay) {
+        void reportSyncPlaySeek(msToTicks(positionMs));
+      }
+    },
+    [reportSyncPlaySeek],
+  );
+
+  const seekFromSyncPlay = useCallback(
+    (positionTicks: number) => {
+      lastSyncPlaySeekAtRef.current = Date.now();
+      // Proactively report buffering — seeking will cause a rebuffer
+      // and the server should know we're not ready yet.
+      void reportSyncPlayBuffering(isPlaying);
+      lastReportedSyncPlayBufferingRef.current = true;
+      seekInternal(ticksToMs(positionTicks), false);
+    },
+    [seekInternal, reportSyncPlayBuffering, isPlaying],
+  );
+
+  useEffect(() => {
+    if (!showSyncPlayModal) {
+      return;
+    }
+
+    void syncPlay.refreshGroups();
+    if (syncPlay.inGroup) {
+      void syncPlay.refreshCurrentGroup();
+    }
+  }, [
+    showSyncPlayModal,
+    syncPlay.inGroup,
+    syncPlay.refreshGroups,
+    syncPlay.refreshCurrentGroup,
+  ]);
+
+  useEffect(() => {
+    if (
+      !api ||
+      offline ||
+      !isInSyncPlayGroup ||
+      !isVideoLoaded ||
+      syncPlay.ignoreWait
+    ) {
+      lastReportedSyncPlayBufferingRef.current = null;
+      if (bufferingDebounceTimerRef.current) {
+        clearTimeout(bufferingDebounceTimerRef.current);
+        bufferingDebounceTimerRef.current = null;
+      }
+      return;
+    }
+
+    if (lastReportedSyncPlayBufferingRef.current === isBuffering) {
+      return;
+    }
+
+    if (isBuffering) {
+      // Debounce: wait before telling the server we're buffering.
+      // Brief stalls resolve on their own and don't need to pause the group.
+      bufferingDebounceTimerRef.current = setTimeout(() => {
+        bufferingDebounceTimerRef.current = null;
+        lastReportedSyncPlayBufferingRef.current = true;
+        void reportSyncPlayBuffering(isPlaying);
+      }, SYNC_PLAY_BUFFERING_DEBOUNCE_MS);
+      return;
+    }
+
+    // Ready: report immediately and cancel any pending buffering notification.
+    if (bufferingDebounceTimerRef.current) {
+      clearTimeout(bufferingDebounceTimerRef.current);
+      bufferingDebounceTimerRef.current = null;
+    }
+    lastReportedSyncPlayBufferingRef.current = false;
+    void reportSyncPlayReady(isPlaying);
+  }, [
+    api,
+    offline,
+    isInSyncPlayGroup,
+    isVideoLoaded,
+    isBuffering,
+    isPlaying,
+    syncPlay.ignoreWait,
+    reportSyncPlayBuffering,
+    reportSyncPlayReady,
+  ]);
+
+  useEffect(() => {
+    const wasConnected = wasSocketConnectedRef.current;
+    if (
+      !wasConnected &&
+      isConnected &&
+      syncPlay.inGroup &&
+      !syncPlay.ignoreWait &&
+      isVideoLoaded &&
+      !offline
+    ) {
+      void reportSyncPlayReady(isPlaying);
+    }
+    wasSocketConnectedRef.current = isConnected;
+  }, [
+    isConnected,
+    syncPlay.inGroup,
+    syncPlay.ignoreWait,
+    isVideoLoaded,
+    offline,
+    isPlaying,
+    reportSyncPlayReady,
+  ]);
+
+  useEffect(() => {
+    if (
+      !syncPlay.inGroup ||
+      syncPlay.ignoreWait ||
+      !currentSyncPlayQueueState ||
+      offline
+    ) {
+      return;
+    }
+
+    // Skip if a local play/pause command was just sent — give the server
+    // time to process and broadcast the state change before we override.
+    if (
+      Date.now() - lastLocalPlayPauseCommandAtRef.current <
+      SYNC_PLAY_RESYNC_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    const syncPlayIsPlaying = getAuthoritativeSyncPlayIsPlaying();
+    if (syncPlayIsPlaying === true && !isPlaying && !isBuffering) {
+      playFromSyncPlay();
+      return;
+    }
+
+    if (syncPlayIsPlaying === false && isPlaying) {
+      pauseFromSyncPlay();
+    }
+  }, [
+    syncPlay.inGroup,
+    syncPlay.ignoreWait,
+    currentSyncPlayQueueState,
+    offline,
+    isPlaying,
+    isBuffering,
+    playFromSyncPlay,
+    pauseFromSyncPlay,
+    getAuthoritativeSyncPlayIsPlaying,
+  ]);
+
+  // Clean up SpeedToSync timer on unmount or when leaving group.
+  useEffect(() => {
+    return () => {
+      if (speedSyncTimerRef.current) {
+        clearTimeout(speedSyncTimerRef.current);
+        speedSyncTimerRef.current = null;
+      }
+      isSpeedSyncingRef.current = false;
+    };
+  }, [syncPlay.inGroup]);
+
+  useEffect(() => {
+    if (
+      !settings?.syncPlaySyncCorrection ||
+      !syncPlay.inGroup ||
+      syncPlay.ignoreWait ||
+      !currentSyncPlayQueueState ||
+      offline
+    ) {
+      return;
+    }
+
+    const restoreUserSpeed = () => {
+      isSpeedSyncingRef.current = false;
+      void videoRef.current?.setSpeed?.(currentPlaybackSpeed);
+    };
+
+    const runSyncCorrection = () => {
+      if (isSeeking.get() || isBuffering) {
+        return;
+      }
+
+      const startPositionTicks = currentSyncPlayQueueState.startPositionTicks;
+      if (typeof startPositionTicks !== "number") {
+        return;
+      }
+
+      let targetTicks = startPositionTicks;
+      if (getAuthoritativeSyncPlayIsPlaying() === true) {
+        const observedAtMs = queueUpdateObservedAtRef.current;
+        if (observedAtMs > 0) {
+          targetTicks += msToTicks(Math.max(0, Date.now() - observedAtMs));
+        }
+      }
+
+      const localTicks = msToTicks(progress.get());
+      // Signed drift: positive = we're behind, negative = we're ahead.
+      const driftTicks = targetTicks - localTicks;
+      const driftMs = driftTicks / 10_000;
+      const absDriftMs = Math.abs(driftMs);
+      const now = Date.now();
+
+      // Drift is negligible — ensure we're back to user speed if needed.
+      if (absDriftMs < SYNC_PLAY_MIN_DRIFT_SPEED_SYNC_MS) {
+        if (isSpeedSyncingRef.current) {
+          if (speedSyncTimerRef.current) {
+            clearTimeout(speedSyncTimerRef.current);
+            speedSyncTimerRef.current = null;
+          }
+          restoreUserSpeed();
+        }
+        return;
+      }
+
+      // On cooldown from a recent seek — skip.
+      if (
+        now - lastSyncPlaySeekAtRef.current < SYNC_PLAY_RESYNC_COOLDOWN_MS ||
+        now - lastDriftCorrectionAtRef.current < SYNC_PLAY_RESYNC_COOLDOWN_MS
+      ) {
+        return;
+      }
+
+      // SpeedToSync: smooth catch-up for small drifts.
+      if (absDriftMs <= SYNC_PLAY_MAX_DRIFT_SPEED_SYNC_MS) {
+        if (isSpeedSyncingRef.current) {
+          return; // Already adjusting speed — let it finish.
+        }
+
+        // Calculate adjusted speed: speed up or slow down proportionally.
+        const ratio = 1 + driftMs / SYNC_PLAY_SPEED_SYNC_DURATION_MS;
+        const syncSpeed = Math.max(
+          SYNC_PLAY_MIN_SPEED_CLAMP,
+          currentPlaybackSpeed * ratio,
+        );
+
+        isSpeedSyncingRef.current = true;
+        lastDriftCorrectionAtRef.current = now;
+        void videoRef.current?.setSpeed?.(syncSpeed);
+
+        // Restore user speed after the sync duration.
+        if (speedSyncTimerRef.current) {
+          clearTimeout(speedSyncTimerRef.current);
+        }
+        speedSyncTimerRef.current = setTimeout(() => {
+          speedSyncTimerRef.current = null;
+          restoreUserSpeed();
+        }, SYNC_PLAY_SPEED_SYNC_DURATION_MS);
+        return;
+      }
+
+      // SkipToSync: hard seek for large drifts.
+      if (absDriftMs >= SYNC_PLAY_MIN_DRIFT_SKIP_SYNC_MS) {
+        // Cancel any active SpeedToSync.
+        if (speedSyncTimerRef.current) {
+          clearTimeout(speedSyncTimerRef.current);
+          speedSyncTimerRef.current = null;
+        }
+        if (isSpeedSyncingRef.current) {
+          restoreUserSpeed();
+        }
+
+        lastDriftCorrectionAtRef.current = now;
+        // Random ±50ms offset to prevent resonance between clients.
+        const randomOffsetTicks = msToTicks(Math.random() * 100 - 50);
+        seekFromSyncPlay(targetTicks + randomOffsetTicks);
+      }
+    };
+
+    runSyncCorrection();
+    const interval = setInterval(
+      runSyncCorrection,
+      SYNC_PLAY_DRIFT_CHECK_INTERVAL_MS,
+    );
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [
+    settings?.syncPlaySyncCorrection,
+    syncPlay.inGroup,
+    syncPlay.ignoreWait,
+    currentSyncPlayQueueState,
+    offline,
+    isSeeking,
+    isBuffering,
+    progress,
+    seekFromSyncPlay,
+    getAuthoritativeSyncPlayIsPlaying,
+    currentPlaybackSpeed,
+  ]);
+
+  // Immediate position sync when video first loads in a SyncPlay group.
+  // The periodic drift correction has a 2s interval + cooldown, so without
+  // this the player can start seconds behind the group.
+  const hasPerformedInitialSyncRef = useRef(false);
+  useEffect(() => {
+    if (
+      !isVideoLoaded ||
+      hasPerformedInitialSyncRef.current ||
+      !syncPlay.inGroup ||
+      syncPlay.ignoreWait ||
+      !currentSyncPlayQueueState ||
+      offline
+    ) {
+      return;
+    }
+
+    const startPositionTicks = currentSyncPlayQueueState.startPositionTicks;
+    if (typeof startPositionTicks !== "number") {
+      return;
+    }
+
+    let targetTicks = startPositionTicks;
+    if (getAuthoritativeSyncPlayIsPlaying() === true) {
+      const observedAtMs = queueUpdateObservedAtRef.current;
+      if (observedAtMs > 0) {
+        targetTicks += msToTicks(Math.max(0, Date.now() - observedAtMs));
+      }
+    }
+
+    hasPerformedInitialSyncRef.current = true;
+    seekFromSyncPlay(targetTicks);
+  }, [
+    isVideoLoaded,
+    syncPlay.inGroup,
+    syncPlay.ignoreWait,
+    currentSyncPlayQueueState,
+    offline,
+    seekFromSyncPlay,
+    getAuthoritativeSyncPlayIsPlaying,
+  ]);
+
+  // Safety net: always-on large-drift catch, independent of the sync
+  // correction setting. Catches catastrophic desync from backgrounding,
+  // missed commands, etc. Uses a relaxed 5s threshold — if you're this
+  // far off, something went wrong and we should fix it silently.
+  useEffect(() => {
+    if (
+      !syncPlay.inGroup ||
+      syncPlay.ignoreWait ||
+      !currentSyncPlayQueueState ||
+      offline ||
+      !isVideoLoaded
+    ) {
+      return;
+    }
+
+    const checkSafetyNet = () => {
+      if (isSeeking.get() || isBuffering || !isPlayingRef.current) {
+        return;
+      }
+
+      const startPositionTicks = currentSyncPlayQueueState.startPositionTicks;
+      if (typeof startPositionTicks !== "number") {
+        return;
+      }
+
+      if (getAuthoritativeSyncPlayIsPlaying() !== true) {
+        return;
+      }
+
+      const observedAtMs = queueUpdateObservedAtRef.current;
+      if (observedAtMs <= 0) {
+        return;
+      }
+
+      const targetTicks =
+        startPositionTicks + msToTicks(Math.max(0, Date.now() - observedAtMs));
+      const localTicks = msToTicks(progress.get());
+      const absDriftMs = Math.abs((targetTicks - localTicks) / 10_000);
+
+      if (absDriftMs < SYNC_PLAY_SAFETY_NET_DRIFT_MS) {
+        return;
+      }
+
+      const now = Date.now();
+      if (
+        now - lastSyncPlaySeekAtRef.current < SYNC_PLAY_RESYNC_COOLDOWN_MS ||
+        now - lastDriftCorrectionAtRef.current < SYNC_PLAY_RESYNC_COOLDOWN_MS
+      ) {
+        return;
+      }
+
+      lastDriftCorrectionAtRef.current = now;
+      seekFromSyncPlay(targetTicks);
+    };
+
+    const interval = setInterval(
+      checkSafetyNet,
+      SYNC_PLAY_SAFETY_NET_CHECK_INTERVAL_MS,
+    );
+    return () => clearInterval(interval);
+  }, [
+    syncPlay.inGroup,
+    syncPlay.ignoreWait,
+    currentSyncPlayQueueState,
+    offline,
+    isVideoLoaded,
+    isSeeking,
+    isBuffering,
+    progress,
+    seekFromSyncPlay,
+    getAuthoritativeSyncPlayIsPlaying,
+  ]);
+
+  // Re-sync position when the app returns from background.
+  // Mobile apps get backgrounded frequently; the player stalls while
+  // backgrounded and the position becomes stale.
+  useEffect(() => {
+    if (
+      !syncPlay.inGroup ||
+      syncPlay.ignoreWait ||
+      !currentSyncPlayQueueState ||
+      offline ||
+      !isVideoLoaded
+    ) {
+      return;
+    }
+
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state !== "active") {
+        return;
+      }
+
+      // App just came to foreground — re-sync position.
+      const startPositionTicks = currentSyncPlayQueueState.startPositionTicks;
+      if (typeof startPositionTicks !== "number") {
+        return;
+      }
+
+      if (getAuthoritativeSyncPlayIsPlaying() !== true) {
+        return;
+      }
+
+      const observedAtMs = queueUpdateObservedAtRef.current;
+      if (observedAtMs <= 0) {
+        return;
+      }
+
+      const targetTicks =
+        startPositionTicks + msToTicks(Math.max(0, Date.now() - observedAtMs));
+
+      seekFromSyncPlay(targetTicks);
+      // Also let the server know we're ready (WebSocket may have reconnected).
+      void reportSyncPlayReady(true);
+    });
+
+    return () => subscription.remove();
+  }, [
+    syncPlay.inGroup,
+    syncPlay.ignoreWait,
+    currentSyncPlayQueueState,
+    offline,
+    isVideoLoaded,
+    seekFromSyncPlay,
+    getAuthoritativeSyncPlayIsPlaying,
+    reportSyncPlayReady,
+  ]);
 
   const reportPlaybackStopped = useCallback(async () => {
     if (!item?.Id || !stream?.sessionId || offline || !api) return;
@@ -398,36 +1170,6 @@ export default function page() {
       beforeRemoveListener();
     };
   }, [navigation, stop]);
-
-  const currentPlayStateInfo = useCallback(():
-    | PlaybackProgressInfo
-    | undefined => {
-    if (!stream || !item?.Id) return;
-
-    return {
-      ItemId: item.Id,
-      AudioStreamIndex: audioIndex ? audioIndex : undefined,
-      SubtitleStreamIndex: subtitleIndex ? subtitleIndex : undefined,
-      MediaSourceId: mediaSourceId,
-      PositionTicks: msToTicks(progress.get()),
-      IsPaused: !isPlaying,
-      PlayMethod: stream?.url.includes("m3u8") ? "Transcode" : "DirectStream",
-      PlaySessionId: stream.sessionId,
-      IsMuted: isMuted,
-      CanSeek: true,
-      RepeatMode: RepeatMode.RepeatNone,
-      PlaybackOrder: PlaybackOrder.Default,
-    };
-  }, [
-    stream,
-    item?.Id,
-    audioIndex,
-    subtitleIndex,
-    mediaSourceId,
-    progress,
-    isPlaying,
-    isMuted,
-  ]);
 
   const lastUrlUpdateTime = useSharedValue(0);
   const wasJustSeeking = useSharedValue(false);
@@ -677,11 +1419,20 @@ export default function page() {
     }
   }, []);
 
+  const getCurrentPositionTicks = useCallback(
+    () => msToTicks(progress.get()),
+    [progress],
+  );
+
   useWebSocket({
     isPlaying: isPlaying,
     togglePlay: togglePlay,
     stopPlayback: stop,
     offline,
+    playPlayback: playFromSyncPlay,
+    pausePlayback: pauseFromSyncPlay,
+    seekPlayback: seekFromSyncPlay,
+    getCurrentPositionTicks,
     toggleMute: toggleMuteCb,
     volumeUp: volumeUpCb,
     volumeDown: volumeDownCb,
@@ -707,12 +1458,24 @@ export default function page() {
       }
 
       if (isPaused) {
+        // Detect system-initiated pause (phone call, Siri, headphone disconnect).
+        // When WE pause, isPlayingRef is set to false BEFORE the native event fires.
+        // A system pause fires the native event while isPlayingRef is still true.
+        const wasSystemPause = isPlayingRef.current;
+
         setIsPlaying(false);
         if (item?.Id) {
           playbackManager.reportPlaybackProgress(
             currentPlayStateInfo() as PlaybackProgressInfo,
           );
         }
+
+        // Report to SyncPlay group so everyone pauses together.
+        if (wasSystemPause) {
+          lastLocalPlayPauseCommandAtRef.current = Date.now();
+          void reportSyncPlayPauseRef.current?.();
+        }
+
         if (!Platform.isTV) await deactivateKeepAwake();
         return;
       }
@@ -751,17 +1514,19 @@ export default function page() {
   }, []);
 
   const play = useCallback(() => {
-    videoRef.current?.play?.();
-  }, []);
+    void playPlaybackInternal(false);
+  }, [playPlaybackInternal]);
 
   const pause = useCallback(() => {
-    videoRef.current?.pause?.();
-  }, []);
+    void pausePlaybackInternal(false);
+  }, [pausePlaybackInternal]);
 
-  const seek = useCallback((position: number) => {
-    // MPV expects seconds, convert from ms
-    videoRef.current?.seekTo?.(position / 1000);
-  }, []);
+  const seek = useCallback(
+    (position: number) => {
+      seekInternal(position, true);
+    },
+    [seekInternal],
+  );
 
   // Technical info toggle handler
   const handleToggleTechnicalInfo = useCallback(() => {
@@ -1020,8 +1785,35 @@ export default function page() {
                 getTechnicalInfo={getTechnicalInfo}
                 playMethod={playMethod}
                 transcodeReasons={transcodeReasons}
+                isInSyncPlayGroup={syncPlay.inGroup}
+                openSyncPlay={() => setShowSyncPlayModal(true)}
               />
             )}
+            <SyncPlayModal
+              visible={showSyncPlayModal}
+              onClose={() => setShowSyncPlayModal(false)}
+              inGroup={syncPlay.inGroup}
+              groupId={syncPlay.groupId}
+              groupInfo={syncPlay.groupInfo}
+              queueUpdate={syncPlay.queueUpdate}
+              queueItemNames={syncPlay.queueItemNames}
+              groups={syncPlay.groups}
+              groupsLoading={syncPlay.groupsLoading}
+              actionLoading={syncPlay.actionLoading}
+              error={syncPlay.error}
+              ignoreWait={syncPlay.ignoreWait}
+              currentItemId={item.Id ?? undefined}
+              refreshGroups={syncPlay.refreshGroups}
+              createGroup={syncPlay.createGroup}
+              joinGroup={syncPlay.joinGroup}
+              leaveGroup={syncPlay.leaveGroup}
+              toggleIgnoreWait={syncPlay.toggleIgnoreWait}
+              setNewQueueFromCurrentItem={syncPlay.setNewQueueFromCurrentItem}
+              queueCurrentItem={syncPlay.queueCurrentItem}
+              clearPlaylist={syncPlay.clearPlaylist}
+              setCurrentPlaylistItem={syncPlay.setCurrentPlaylistItem}
+              removePlaylistItem={syncPlay.removePlaylistItem}
+            />
           </View>
         </VideoProvider>
       </PlayerProvider>

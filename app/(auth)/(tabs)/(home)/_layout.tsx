@@ -1,16 +1,21 @@
 import { Feather, Ionicons } from "@expo/vector-icons";
 import { Stack } from "expo-router";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Platform, View } from "react-native";
 import { Pressable } from "react-native-gesture-handler";
 import { nestedTabPageScreenOptions } from "@/components/stacks/NestedTabPageStack";
+import { SyncPlayModal } from "@/components/video-player/controls/SyncPlayModal";
 import useRouter from "@/hooks/useAppRouter";
+import { useSyncPlay } from "@/hooks/useSyncPlay";
 
 const Chromecast = Platform.isTV ? null : require("@/components/Chromecast");
 
 import { useAtom } from "jotai";
 import { useSessions, type useSessionsProps } from "@/hooks/useSessions";
 import { userAtom } from "@/providers/JellyfinProvider";
+import { useWebSocketContext } from "@/providers/WebSocketProvider";
+import { useSettings } from "@/utils/atoms/settings";
 
 export default function IndexLayout() {
   const _router = useRouter();
@@ -28,15 +33,9 @@ export default function IndexLayout() {
           headerTransparent: Platform.OS === "ios",
           headerShadowVisible: false,
           headerRight: () => (
-            <View className='flex flex-row items-center px-2'>
-              {!Platform.isTV && (
-                <>
-                  <Chromecast.Chromecast background='transparent' />
-                  {user?.Policy?.IsAdministrator && <SessionsButton />}
-                  <SettingsButton />
-                </>
-              )}
-            </View>
+            <HomeHeaderRight
+              isAdministrator={Boolean(user?.Policy?.IsAdministrator)}
+            />
           ),
         }}
       />
@@ -380,6 +379,166 @@ const SessionsButton = () => {
         name='play-circle'
         color={sessions.length === 0 ? "white" : "#9333ea"}
         size={28}
+      />
+    </Pressable>
+  );
+};
+
+type HomeHeaderRightProps = {
+  isAdministrator: boolean;
+};
+
+const HomeHeaderRight = ({ isAdministrator }: HomeHeaderRightProps) => {
+  const router = useRouter();
+  const { settings } = useSettings();
+  const [showSyncPlayModal, setShowSyncPlayModal] = useState(false);
+  const {
+    isInSyncPlayGroup,
+    syncPlayCurrentItemId,
+    syncPlayCurrentPositionTicks,
+    syncPlayCurrentPositionCapturedAtMs,
+    isSyncPlayCurrentPositionPlaying,
+  } = useWebSocketContext();
+  const syncPlay = useSyncPlay({
+    offline: false,
+    suppressToasts: true,
+  });
+  const canResumePlayback = Boolean(isInSyncPlayGroup && syncPlayCurrentItemId);
+
+  const estimatedPositionTicks =
+    typeof syncPlayCurrentPositionTicks === "number"
+      ? Math.max(
+          0,
+          Math.round(
+            syncPlayCurrentPositionTicks +
+              (isSyncPlayCurrentPositionPlaying &&
+              typeof syncPlayCurrentPositionCapturedAtMs === "number"
+                ? Math.max(
+                    0,
+                    Date.now() - syncPlayCurrentPositionCapturedAtMs,
+                  ) * 10_000
+                : 0),
+          ),
+        )
+      : undefined;
+
+  const handleResumePlayback = useCallback(() => {
+    if (!syncPlayCurrentItemId) {
+      return;
+    }
+
+    router.push({
+      pathname: "/(auth)/player/direct-player",
+      params: {
+        itemId: syncPlayCurrentItemId,
+        offline: "false",
+        playbackPosition: estimatedPositionTicks?.toString(),
+      },
+    });
+    setShowSyncPlayModal(false);
+  }, [router, syncPlayCurrentItemId, estimatedPositionTicks]);
+
+  const syncPlayRef = useRef(syncPlay);
+  syncPlayRef.current = syncPlay;
+  const handleResumePlaybackRef = useRef(handleResumePlayback);
+  handleResumePlaybackRef.current = handleResumePlayback;
+  const wasInGroupRef = useRef(syncPlay.inGroup);
+  const prevItemIdRef = useRef(syncPlayCurrentItemId);
+
+  // Auto-open player when:
+  // 1. Joining a group that already has an active item
+  // 2. Already in a group and playback starts (item goes from null to something)
+  useEffect(() => {
+    const justJoinedGroup = !wasInGroupRef.current && syncPlay.inGroup;
+    const playbackJustStarted =
+      syncPlay.inGroup && !prevItemIdRef.current && syncPlayCurrentItemId;
+
+    if ((justJoinedGroup || playbackJustStarted) && syncPlayCurrentItemId) {
+      handleResumePlaybackRef.current();
+    }
+
+    wasInGroupRef.current = syncPlay.inGroup;
+    prevItemIdRef.current = syncPlayCurrentItemId;
+  }, [syncPlay.inGroup, syncPlayCurrentItemId]);
+
+  useEffect(() => {
+    if (!showSyncPlayModal) {
+      return;
+    }
+    void syncPlayRef.current.refreshGroups();
+    if (syncPlayRef.current.inGroup) {
+      void syncPlayRef.current.refreshCurrentGroup();
+    }
+  }, [showSyncPlayModal]);
+
+  return (
+    <View className='flex flex-row items-center px-2'>
+      {!Platform.isTV && (
+        <>
+          <Chromecast.Chromecast background='transparent' />
+          {isAdministrator && <SessionsButton />}
+          {settings.showHomeSyncPlayButton && (
+            <HomeSyncPlayButton
+              isInSyncPlayGroup={isInSyncPlayGroup}
+              onOpenSyncPlay={() => setShowSyncPlayModal(true)}
+            />
+          )}
+          <SettingsButton />
+        </>
+      )}
+      {!Platform.isTV && (
+        <SyncPlayModal
+          visible={showSyncPlayModal}
+          onClose={() => setShowSyncPlayModal(false)}
+          simpleMode
+          canResumePlayback={canResumePlayback}
+          onResumePlayback={handleResumePlayback}
+          inGroup={syncPlay.inGroup}
+          groupId={syncPlay.groupId}
+          groupInfo={syncPlay.groupInfo}
+          queueUpdate={syncPlay.queueUpdate}
+          queueItemNames={syncPlay.queueItemNames}
+          groups={syncPlay.groups}
+          groupsLoading={syncPlay.groupsLoading}
+          actionLoading={syncPlay.actionLoading}
+          error={syncPlay.error}
+          ignoreWait={syncPlay.ignoreWait}
+          refreshGroups={syncPlay.refreshGroups}
+          createGroup={syncPlay.createGroup}
+          joinGroup={syncPlay.joinGroup}
+          leaveGroup={syncPlay.leaveGroup}
+          toggleIgnoreWait={syncPlay.toggleIgnoreWait}
+          setNewQueueFromCurrentItem={syncPlay.setNewQueueFromCurrentItem}
+          queueCurrentItem={syncPlay.queueCurrentItem}
+          clearPlaylist={syncPlay.clearPlaylist}
+          setCurrentPlaylistItem={syncPlay.setCurrentPlaylistItem}
+          removePlaylistItem={syncPlay.removePlaylistItem}
+        />
+      )}
+    </View>
+  );
+};
+
+type HomeSyncPlayButtonProps = {
+  isInSyncPlayGroup: boolean;
+  onOpenSyncPlay: () => void;
+};
+
+const HomeSyncPlayButton = ({
+  isInSyncPlayGroup,
+  onOpenSyncPlay,
+}: HomeSyncPlayButtonProps) => {
+  return (
+    <Pressable
+      onPress={() => {
+        onOpenSyncPlay();
+      }}
+      className='mr-4'
+    >
+      <Ionicons
+        name={isInSyncPlayGroup ? "people" : "people-outline"}
+        color={isInSyncPlayGroup ? "#34d399" : "white"}
+        size={24}
       />
     </Pressable>
   );

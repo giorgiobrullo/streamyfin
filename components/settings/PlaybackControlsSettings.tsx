@@ -22,7 +22,8 @@ export const PlaybackControlsSettings: React.FC = () => {
     () =>
       pluginSettings?.defaultVideoOrientation?.locked === true &&
       pluginSettings?.safeAreaInControlsEnabled?.locked === true &&
-      pluginSettings?.disableHapticFeedback?.locked === true,
+      pluginSettings?.disableHapticFeedback?.locked === true &&
+      pluginSettings?.showHomeSyncPlayButton?.locked === true,
     [pluginSettings],
   );
 
@@ -210,6 +211,28 @@ export const PlaybackControlsSettings: React.FC = () => {
             disabled={pluginSettings?.disableHapticFeedback?.locked}
             onValueChange={(disableHapticFeedback) =>
               updateSettings({ disableHapticFeedback })
+            }
+          />
+        </ListItem>
+
+        <ListItem
+          title={t("home.settings.other.show_home_syncplay_button")}
+          disabled={pluginSettings?.showHomeSyncPlayButton?.locked}
+        >
+          <Switch
+            value={settings.showHomeSyncPlayButton}
+            disabled={pluginSettings?.showHomeSyncPlayButton?.locked}
+            onValueChange={(showHomeSyncPlayButton) =>
+              updateSettings({ showHomeSyncPlayButton })
+            }
+          />
+        </ListItem>
+
+        <ListItem title={t("home.settings.other.syncplay_sync_correction")}>
+          <Switch
+            value={settings.syncPlaySyncCorrection}
+            onValueChange={(syncPlaySyncCorrection) =>
+              updateSettings({ syncPlaySyncCorrection })
             }
           />
         </ListItem>
