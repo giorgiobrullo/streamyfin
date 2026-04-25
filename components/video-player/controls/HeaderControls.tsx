@@ -3,8 +3,14 @@ import type {
   BaseItemDto,
   MediaSourceInfo,
 } from "@jellyfin/sdk/lib/generated-client";
+import { VideoAirPlayButton } from "expo-video";
 import { type FC, useCallback, useState } from "react";
-import { Platform, TouchableOpacity, View } from "react-native";
+import {
+  ActivityIndicator,
+  Platform,
+  TouchableOpacity,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import useRouter from "@/hooks/useAppRouter";
 import { useHaptic } from "@/hooks/useHaptic";
@@ -39,6 +45,11 @@ interface HeaderControlsProps {
   onToggleTechnicalInfo?: () => void;
   isInSyncPlayGroup?: boolean;
   openSyncPlay?: () => void;
+  // AirPlay
+  isAirplayActive?: boolean;
+  airplayLoading?: boolean;
+  onEnableAirplay?: () => void;
+  onDisableAirplay?: () => void;
 }
 
 export const HeaderControls: FC<HeaderControlsProps> = ({
@@ -61,6 +72,10 @@ export const HeaderControls: FC<HeaderControlsProps> = ({
   onToggleTechnicalInfo,
   isInSyncPlayGroup = false,
   openSyncPlay,
+  isAirplayActive = false,
+  airplayLoading = false,
+  onEnableAirplay,
+  onDisableAirplay,
 }) => {
   const { settings } = useSettings();
   const router = useRouter();
@@ -195,6 +210,27 @@ export const HeaderControls: FC<HeaderControlsProps> = ({
           onToggle={onZoomToggle ?? (() => {})}
           disabled={!onZoomToggle}
         />
+        {!Platform.isTV && Platform.OS === "ios" && onEnableAirplay && (
+          <View className='aspect-square flex flex-col rounded-xl items-center justify-center p-2'>
+            {airplayLoading ? (
+              <ActivityIndicator size='small' color='white' />
+            ) : (
+              <VideoAirPlayButton
+                style={{ width: ICON_SIZES.HEADER, height: ICON_SIZES.HEADER }}
+                tint='white'
+                activeTint='#9334E9'
+                prioritizeVideoDevices
+                onBeginPresentingRoutes={() => {
+                  // Pre-arm the native player so AVPlayer is the active session
+                  // when the user picks an AirPlay route from the system picker.
+                  if (!isAirplayActive) {
+                    onEnableAirplay?.();
+                  }
+                }}
+              />
+            )}
+          </View>
+        )}
         <TouchableOpacity
           onPress={onClose}
           className='aspect-square flex flex-col rounded-xl items-center justify-center p-2'

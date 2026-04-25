@@ -33,6 +33,7 @@ import {
   PlaybackSpeedScope,
   updatePlaybackSpeedSettings,
 } from "@/components/video-player/controls/utils/playback-speed-settings";
+import { NativeVideoPlayer } from "@/components/video-player/NativeVideoPlayer";
 import useRouter from "@/hooks/useAppRouter";
 import { useHaptic } from "@/hooks/useHaptic";
 import { useOrientation } from "@/hooks/useOrientation";
@@ -64,6 +65,7 @@ import {
 
 import { useSettings } from "@/utils/atoms/settings";
 import { getPrimaryImageUrl } from "@/utils/jellyfin/image/getPrimaryImageUrl";
+import { getAirplayStreamUrl } from "@/utils/jellyfin/media/getAirplayStreamUrl";
 import { getStreamUrl } from "@/utils/jellyfin/media/getStreamUrl";
 import {
   getMpvAudioId,
@@ -127,6 +129,11 @@ export default function page() {
   const [currentPlaybackSpeed, setCurrentPlaybackSpeed] = useState(1.0);
   const [showTechnicalInfo, setShowTechnicalInfo] = useState(false);
   const [showSyncPlayModal, setShowSyncPlayModal] = useState(false);
+  const [airplayHlsUrl, setAirplayHlsUrl] = useState<string | null>(null);
+  const [airplayLoading, setAirplayLoading] = useState(false);
+  /** When non-null, overrides the default start position for the MPV player on next mount. */
+  const [resumePositionSecondsOverride, setResumePositionSecondsOverride] =
+    useState<number | null>(null);
   const lastReportedSyncPlayBufferingRef = useRef<boolean | null>(null);
   const isPlayingRef = useRef(false);
   const reportSyncPlayPauseRef = useRef<(() => Promise<void>) | undefined>(
@@ -1311,11 +1318,14 @@ export default function page() {
       isTranscoding,
     );
 
-    // Calculate start position directly here to avoid timing issues
+    // Calculate start position directly here to avoid timing issues.
+    // If we just exited an AirPlay session, resume from the position the native
+    // player was at instead of the original load position.
     const startTicks = playbackPositionFromUrl
       ? Number.parseInt(playbackPositionFromUrl, 10)
       : (item?.UserData?.PlaybackPositionTicks ?? 0);
-    const startPos = ticksToSeconds(startTicks);
+    const startPos =
+      resumePositionSecondsOverride ?? ticksToSeconds(startTicks);
 
     // Build source config - headers only needed for online streaming
     const source: MpvVideoSource = {
@@ -1349,7 +1359,98 @@ export default function page() {
     subtitleIndex,
     audioIndex,
     offline,
+    resumePositionSecondsOverride,
   ]);
+
+  /**
+   * AirPlay-compatible HLS source built when the user activates AirPlay.
+   * The Jellyfin server transcodes to H.264/H.265 + AAC/AC-3 + burn-in subs so
+   * the Apple TV can pull the stream directly via AVPlayer.
+   */
+  const airplayVideoSource = useMemo<MpvVideoSource | undefined>(() => {
+    if (!airplayHlsUrl) return undefined;
+    return {
+      url: airplayHlsUrl,
+      autoplay: true,
+      // Position is already encoded into the HLS URL via startTimeTicks
+      startPosition: 0,
+      headers: api?.accessToken
+        ? { Authorization: `MediaBrowser Token="${api.accessToken}"` }
+        : undefined,
+    };
+  }, [airplayHlsUrl, api?.accessToken]);
+
+  const enableAirplayMode = useCallback(async () => {
+    if (
+      !api ||
+      !user?.Id ||
+      !item?.Id ||
+      airplayLoading ||
+      airplayHlsUrl ||
+      offline
+    ) {
+      return;
+    }
+
+    setAirplayLoading(true);
+    try {
+      const currentSeconds =
+        (await videoRef.current?.getCurrentPosition()) ?? 0;
+      await videoRef.current?.pause();
+
+      const result = await getAirplayStreamUrl({
+        api,
+        item,
+        userId: user.Id,
+        startTimeTicks: msToTicks(currentSeconds * 1000),
+        maxStreamingBitrate: settings?.defaultBitrate?.value ?? undefined,
+        audioStreamIndex: audioIndex,
+        subtitleStreamIndex: subtitleIndex,
+        mediaSourceId: stream?.mediaSource?.Id,
+        deviceId: api.deviceInfo?.id,
+      });
+
+      if (result?.url) {
+        setAirplayHlsUrl(result.url);
+      } else {
+        // Fall back: resume MPV
+        await videoRef.current?.play();
+      }
+    } catch (e) {
+      console.warn("Failed to enable AirPlay mode:", e);
+      try {
+        await videoRef.current?.play();
+      } catch {}
+    } finally {
+      setAirplayLoading(false);
+    }
+  }, [
+    api,
+    user?.Id,
+    item,
+    airplayLoading,
+    airplayHlsUrl,
+    offline,
+    settings?.defaultBitrate?.value,
+    audioIndex,
+    subtitleIndex,
+    stream?.mediaSource?.Id,
+  ]);
+
+  const disableAirplayMode = useCallback(async () => {
+    if (!airplayHlsUrl) return;
+
+    let resumeAt = 0;
+    try {
+      resumeAt = (await videoRef.current?.getCurrentPosition()) ?? 0;
+      await videoRef.current?.pause();
+    } catch (e) {
+      console.warn("Failed to capture native player position:", e);
+    }
+
+    setResumePositionSecondsOverride(resumeAt);
+    setAirplayHlsUrl(null);
+  }, [airplayHlsUrl]);
 
   const volumeUpCb = useCallback(async () => {
     if (Platform.isTV) return;
@@ -1719,26 +1820,58 @@ export default function page() {
                 justifyContent: "center",
               }}
             >
-              <MpvPlayerView
-                ref={videoRef}
-                source={videoSource}
-                style={{ width: "100%", height: "100%" }}
-                nowPlayingMetadata={nowPlayingMetadata}
-                onProgress={onProgress}
-                onPlaybackStateChange={onPlaybackStateChanged}
-                onLoad={() => setIsVideoLoaded(true)}
-                onError={(e: { nativeEvent: MpvOnErrorEventPayload }) => {
-                  console.error("Video Error:", e.nativeEvent);
-                  Alert.alert(
-                    t("player.error"),
-                    t("player.an_error_occured_while_playing_the_video"),
-                  );
-                  writeToLog("ERROR", "Video Error", e.nativeEvent);
-                }}
-                onTracksReady={() => {
-                  setTracksReady(true);
-                }}
-              />
+              {airplayHlsUrl ? (
+                <NativeVideoPlayer
+                  ref={videoRef}
+                  source={airplayVideoSource}
+                  style={{ width: "100%", height: "100%" }}
+                  nowPlayingMetadata={nowPlayingMetadata}
+                  onProgress={onProgress}
+                  onPlaybackStateChange={onPlaybackStateChanged}
+                  onLoad={() => setIsVideoLoaded(true)}
+                  onError={(e: { nativeEvent: MpvOnErrorEventPayload }) => {
+                    console.error("AirPlay Video Error:", e.nativeEvent);
+                    Alert.alert(
+                      t("player.error"),
+                      t("player.an_error_occured_while_playing_the_video"),
+                    );
+                    writeToLog("ERROR", "AirPlay Video Error", e.nativeEvent);
+                    // Fall back to MPV
+                    void disableAirplayMode();
+                  }}
+                  onTracksReady={() => {
+                    setTracksReady(true);
+                  }}
+                  onExternalPlaybackChange={(isExternal) => {
+                    // When user disconnects AirPlay (picks "iPhone" again),
+                    // swap back to MPV at the current position.
+                    if (!isExternal) {
+                      void disableAirplayMode();
+                    }
+                  }}
+                />
+              ) : (
+                <MpvPlayerView
+                  ref={videoRef}
+                  source={videoSource}
+                  style={{ width: "100%", height: "100%" }}
+                  nowPlayingMetadata={nowPlayingMetadata}
+                  onProgress={onProgress}
+                  onPlaybackStateChange={onPlaybackStateChanged}
+                  onLoad={() => setIsVideoLoaded(true)}
+                  onError={(e: { nativeEvent: MpvOnErrorEventPayload }) => {
+                    console.error("Video Error:", e.nativeEvent);
+                    Alert.alert(
+                      t("player.error"),
+                      t("player.an_error_occured_while_playing_the_video"),
+                    );
+                    writeToLog("ERROR", "Video Error", e.nativeEvent);
+                  }}
+                  onTracksReady={() => {
+                    setTracksReady(true);
+                  }}
+                />
+              )}
               {!hasPlaybackStarted && (
                 <View
                   style={{
@@ -1787,6 +1920,10 @@ export default function page() {
                 transcodeReasons={transcodeReasons}
                 isInSyncPlayGroup={syncPlay.inGroup}
                 openSyncPlay={() => setShowSyncPlayModal(true)}
+                isAirplayActive={Boolean(airplayHlsUrl)}
+                airplayLoading={airplayLoading}
+                onEnableAirplay={enableAirplayMode}
+                onDisableAirplay={disableAirplayMode}
               />
             )}
             <SyncPlayModal

@@ -74,6 +74,11 @@ interface Props {
   transcodeReasons?: string[];
   isInSyncPlayGroup?: boolean;
   openSyncPlay?: () => void;
+  // AirPlay
+  isAirplayActive?: boolean;
+  airplayLoading?: boolean;
+  onEnableAirplay?: () => void;
+  onDisableAirplay?: () => void;
 }
 
 export const Controls: FC<Props> = ({
@@ -105,6 +110,10 @@ export const Controls: FC<Props> = ({
   transcodeReasons,
   isInSyncPlayGroup = false,
   openSyncPlay,
+  isAirplayActive = false,
+  airplayLoading = false,
+  onEnableAirplay,
+  onDisableAirplay,
 }) => {
   const offline = useOfflineMode();
   const { settings, updateSettings } = useSettings();
@@ -511,6 +520,10 @@ export const Controls: FC<Props> = ({
               onToggleTechnicalInfo={onToggleTechnicalInfo}
               isInSyncPlayGroup={isInSyncPlayGroup}
               openSyncPlay={openSyncPlay}
+              isAirplayActive={isAirplayActive}
+              airplayLoading={airplayLoading}
+              onEnableAirplay={onEnableAirplay}
+              onDisableAirplay={onDisableAirplay}
             />
           </Animated.View>
           <Animated.View
