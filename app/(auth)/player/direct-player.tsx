@@ -98,6 +98,7 @@ const SYNC_PLAY_SAFETY_NET_CHECK_INTERVAL_MS = 3000;
 
 export default function page() {
   const videoRef = useRef<MpvPlayerViewRef>(null);
+  const airplayWasActiveRef = useRef(false);
   const user = useAtomValue(userAtom);
   const api = useAtomValue(apiAtom);
   const {
@@ -1843,9 +1844,14 @@ export default function page() {
                     setTracksReady(true);
                   }}
                   onExternalPlaybackChange={(isExternal) => {
-                    // When user disconnects AirPlay (picks "iPhone" again),
-                    // swap back to MPV at the current position.
-                    if (!isExternal) {
+                    if (isExternal) {
+                      airplayWasActiveRef.current = true;
+                      return;
+                    }
+                    // Only swap back to MPV if AirPlay was actually active at
+                    // some point — guards against initial-mount false events.
+                    if (airplayWasActiveRef.current) {
+                      airplayWasActiveRef.current = false;
                       void disableAirplayMode();
                     }
                   }}
